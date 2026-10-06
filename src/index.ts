@@ -30,14 +30,10 @@ export function distribute(patterns: readonly string[], options: DistributeOptio
   }
 
   // 1. Parse every input before intersecting so invalid syntax never depends on input order.
-  // Bound recursion depth independently of the configurable expansion budget, before `!` is collapsed.
-  if (patterns.some(pattern => pattern.length > 512)) {
-    throw new RangeError('Glob patterns must not exceed 512 UTF-16 code units')
-  }
   const included: string[][] = []
   const excluded: string[] = []
   for (const pattern of new Set(patterns.map(stripNegation))) {
-    const group = parse(pattern.replace(/^!/u, ''), budget)
+    const group = parse(toBytes(pattern.replace(/^!/u, '')), budget)
     if (pattern.startsWith('!')) {
       excluded.push(...group)
     } else {
@@ -73,7 +69,13 @@ export function distribute(patterns: readonly string[], options: DistributeOptio
   for (const negated of negations) {
     add(output, `!${negated}`, budget)
   }
-  return [...output]
+  const serialized = new Set<string>()
+  for (const pattern of output) {
+    for (const value of serialize(pattern, budget)) {
+      add(serialized, value, budget)
+    }
+  }
+  return [...serialized]
 }
 
 /** Collapse leading `!` so `!!a` is `a`, and `!!!a` is `!a`. */
@@ -116,89 +118,332 @@ function add(target: Set<string>, value: string, budget: Budget): void {
   budget.check(target.size)
 }
 
+const ESCAPED = String.raw`\\[\s\S]`
+const CHARACTER = new RegExp(`${ESCAPED}|[^]`, 'gu')
+
 function tokenize(pattern: string): string[] {
-  return pattern.match(/\\[\s\S]|[^]/gu) ?? []
+  const characters = pattern.match(CHARACTER) ?? []
+  const tokens: string[] = []
+  let classesPossible = true
+  for (let i = 0; i < characters.length; i += 1) {
+    if (characters[i] === '[' && classesPossible) {
+      let first = i + 1
+      if (characters[first] === '!' || characters[first] === '^') {
+        first += 1
+      }
+      // The first member is literal, even when it is ]; escaped characters are already single units.
+      let end = first + 1
+      while (end < characters.length && characters[end] !== ']') {
+        end += 1
+      }
+      if (end < characters.length) {
+        tokens.push(characters.slice(i, end + 1).join(''))
+        i = end
+        continue
+      }
+      // No closing bracket remains for any later opener. Emit ordinary tokens without rescanning the suffix.
+      classesPossible = false
+    }
+    tokens.push(characters[i])
+  }
+  return tokens
 }
 
-/** Expand braces, then normalize each alternative. Returns deduplicated path patterns. */
-function parse(pattern: string, budget: Budget): string[] {
-  const tokens = tokenize(pattern)
-  let position = 0
+interface Token {
+  value: string
+  index: number
+}
 
-  function sequence(nested: boolean): string[] {
-    let result = ['']
+/** Expand choices without erasing the source boundaries used by fast-glob's globstar matcher. */
+function parse(pattern: string, budget: Budget): string[] {
+  let offset = 0
+  const tokens = tokenize(pattern).map(value => {
+    const token = { value, index: offset }
+    offset += value.length
+    return token
+  })
+  let position = 0
+  let groups = 0
+
+  function sequence(depth: number): Token[][] {
+    let result: Token[][] = [[]]
     while (position < tokens.length) {
       const token = tokens[position]
-      if (nested && (token === ',' || token === '}')) {
+      if (depth > 0 && (token.value === ',' || token.value === '}')) {
         break
       }
       position += 1
-      let alternatives = [token]
-      if (token === '{') {
-        const choices = new Set<string>()
+      let alternatives = [[token]]
+      if (token.value === '{') {
+        groups += 1
+        if (depth >= 10 || groups > 10) {
+          throw new SyntaxError(
+            'Glob patterns support at most 10 brace groups and 10 nesting levels'
+          )
+        }
+        alternatives = []
+        const seen = new Set<string>()
         for (;;) {
-          for (const choice of sequence(true)) {
-            add(choices, choice, budget)
+          // Entering a branch resets match_start, even when the branch is empty.
+          const start = tokens[position]?.index ?? pattern.length
+          const choices = sequence(depth + 1)
+          const separator = tokens.at(position++)
+          for (const choice of choices) {
+            const key = JSON.stringify(choice.map(token => token.value))
+            if (seen.has(key)) {
+              continue
+            }
+            seen.add(key)
+            alternatives.push([{ value: '{', index: start }, ...choice, { value: '}', index: 0 }])
+            budget.check(alternatives.length)
           }
-          const separator = tokens[position++]
-          if (separator === '}') {
+          if (separator?.value === '}') {
             break
           }
-          if (separator !== ',') {
+          if (separator?.value !== ',') {
             throw new SyntaxError('Unclosed brace in glob')
           }
         }
-        alternatives = [...choices]
-      } else if (['}', '[', ']', '(', ')', '!'].includes(token) || token === '\\') {
-        throw new SyntaxError(`Unsupported or unescaped glob token: ${token}`)
+      } else if (token.value === '[' || token.value === '\\') {
+        throw new SyntaxError(
+          token.value === '[' ? 'Unclosed character class in glob' : 'Trailing backslash in glob'
+        )
+      } else if (token.value === '}') {
+        alternatives = [[{ ...token, value: String.raw`\}` }]]
       }
-      const expanded = new Set<string>()
+      if (alternatives.length === 1) {
+        for (const prefix of result) {
+          budget.step()
+          for (const token of alternatives[0]) {
+            prefix.push(token)
+          }
+        }
+        continue
+      }
+      const expanded: Token[][] = []
       for (const prefix of result) {
         for (const suffix of alternatives) {
-          add(expanded, prefix + suffix, budget)
+          budget.step()
+          expanded.push([...prefix, ...suffix])
+          budget.check(expanded.length)
         }
       }
-      result = [...expanded]
+      result = expanded
     }
     return result
   }
 
-  return [...new Set(sequence(false).map(normalize))]
-}
-
-/** Resolve `**` the way standard globbers do: a whole segment spans directories, anywhere else it is `*`. */
-function normalize(pattern: string): string {
-  const segments: string[] = []
-  for (const tokens of splitSegments(pattern)) {
-    const segment =
-      tokens.join('') === '**'
-        ? '**'
-        : tokens.filter((token, i) => token !== '*' || tokens[i - 1] !== '*').join('')
-    if (segment !== '**' || segments.at(-1) !== '**') {
-      segments.push(segment)
+  const output = new Set<string>()
+  for (const alternative of sequence(0)) {
+    for (const normalized of normalize(alternative, pattern, budget)) {
+      add(output, normalized, budget)
     }
   }
-  return segments.join('/')
+  return [...output]
 }
 
-/** Split on `/`. Escaping a slash has no effect in a glob, so `\/` separates too. */
-function splitSegments(pattern: string): string[][] {
-  const segments: string[][] = [[]]
-  for (const token of tokenize(pattern)) {
-    if (token === '/' || token === String.raw`\/`) {
-      segments.push([])
+/** Interpret stars before removing braces: adjacent stars from separate branches never become a globstar. */
+function normalize(tokens: Token[], source: string, budget: Budget): string[] {
+  const units: string[] = []
+  let start = 0
+  for (let i = 0; i < tokens.length; i += 1) {
+    const { value, index } = tokens[i]
+    if (value === '{') {
+      start = index
+      continue
+    }
+    if (value === '}') {
+      continue
+    }
+    if (value === '*') {
+      let end = index + 1
+      if (source[end] === '*') {
+        end += 1
+        while (source.slice(end, end + 4) === '/**/') {
+          end += 3
+        }
+        if (source.slice(end) === '/**') {
+          end += 3
+        }
+        while (tokens[i + 1] && tokens[i + 1].value !== '}' && tokens[i + 1].index < end) {
+          i += 1
+        }
+        let next = i + 1
+        while (tokens[next]?.value === '}') {
+          next += 1
+        }
+        if (
+          (index <= start || source[end - 3] === '/') &&
+          (!tokens[next] || tokens[next].value === '/')
+        ) {
+          units.push(tokens[next] ? '**/' : '**')
+          i = next
+          continue
+        }
+      }
+      if (units.at(-1) !== '*') {
+        units.push('*')
+      }
+    } else if (value.startsWith('[')) {
+      const formatted = formatRanges(parseClass(value))
+      if (formatted.length === 0) {
+        return []
+      }
+      units.push(...formatted)
     } else {
-      segments.at(-1)?.push(token)
+      units.push(value === '?' ? '?' : escape(codePoint(value), LITERAL_SPECIALS))
     }
   }
-  return segments
+
+  let result = new Map([['', false]])
+  for (const unit of units) {
+    const next = new Map<string, boolean>()
+    function append(prefix: string, endsWithStar: boolean): void {
+      budget.step()
+      next.set(prefix, endsWithStar)
+      budget.check(next.size)
+    }
+    for (const [prefix, endsWithStar] of result) {
+      // A brace branch can start ** in the middle of a segment. Split its zero-directory and recursive cases.
+      if ((unit === '**/' || unit === '**') && prefix !== '' && !prefix.endsWith('/')) {
+        const starred = endsWithStar ? prefix : `${prefix}*`
+        append(unit === '**' ? starred : prefix, unit === '**' || endsWithStar)
+        append(`${starred}/${unit}`, unit === '**')
+      } else {
+        append(unit === '*' && endsWithStar ? prefix : prefix + unit, unit === '*' || unit === '**')
+      }
+    }
+    result = next
+  }
+  return [...result.keys()]
+}
+
+/** Sorted, disjoint inclusive byte ranges. Every single-character unit is a set, so one intersection serves them all. */
+type Ranges = [number, number][]
+
+const MAX_BYTE = 255
+const SLASH: Ranges = [[47, 47]]
+const LITERAL_SPECIALS = new Set(String.raw`\*?[]{}(),!`)
+const CLASS_SPECIALS = new Set(String.raw`\]-^!`)
+const ANY: Ranges = subtract(complement([]), SLASH)
+
+function unescape(token: string): string {
+  if (!token.startsWith('\\')) {
+    return token
+  }
+  return (
+    ({ b: '\b', n: '\n', r: '\r', t: '\t' } as Record<string, string>)[token[1]] ?? token.slice(1)
+  )
+}
+
+function codePoint(token: string): number {
+  return unescape(token).codePointAt(0) ?? 0
+}
+
+/** Merge overlapping or adjacent ranges into canonical form. */
+function merge(ranges: Ranges): Ranges {
+  const merged: Ranges = []
+  for (const [low, high] of ranges.toSorted((left, right) => left[0] - right[0])) {
+    const last = merged.at(-1)
+    if (last && low <= last[1] + 1) {
+      last[1] = Math.max(last[1], high)
+    } else {
+      merged.push([low, high])
+    }
+  }
+  return merged
+}
+
+function complement(ranges: Ranges): Ranges {
+  const result: Ranges = []
+  let next = 0
+  for (const [low, high] of ranges) {
+    if (low > next) {
+      result.push([next, low - 1])
+    }
+    next = high + 1
+  }
+  if (next <= MAX_BYTE) {
+    result.push([next, MAX_BYTE])
+  }
+  return result
+}
+
+function intersectRanges(left: Ranges, right: Ranges): Ranges {
+  const result: Ranges = []
+  for (const [lowA, highA] of left) {
+    for (const [lowB, highB] of right) {
+      const low = Math.max(lowA, lowB)
+      const high = Math.min(highA, highB)
+      if (low <= high) {
+        result.push([low, high])
+      }
+    }
+  }
+  return result
+}
+
+function subtract(ranges: Ranges, removed: Ranges): Ranges {
+  return intersectRanges(ranges, complement(removed))
+}
+
+/** Mirror fast-glob's class loop: `^`/`!` negates, `-` is a range unless first, last, or escaped; `/` never matches. */
+function parseClass(token: string): Ranges {
+  const negated = /^\[[!^]/u.test(token)
+  const members = token.slice(negated ? 2 : 1, -1).match(CHARACTER) ?? []
+  const ranges: Ranges = []
+  for (let i = 0; i < members.length; i += 1) {
+    const low = codePoint(members[i])
+    const ranged = members[i + 1] === '-' && i + 2 < members.length
+    const high = ranged ? codePoint(members[i + 2]) : low
+    if (low <= high) {
+      ranges.push([low, high])
+    }
+    i += ranged ? 2 : 0
+  }
+  const set = merge(ranges)
+  return subtract(negated ? complement(set) : set, SLASH)
+}
+
+function toRanges(unit: string): Ranges {
+  if (unit === '?') {
+    return ANY
+  }
+  return unit.startsWith('[') ? parseClass(unit) : [[codePoint(unit), codePoint(unit)]]
+}
+
+function escape(code: number, specials: Set<string>): string {
+  const character = String.fromCodePoint(code)
+  return specials.has(character) ? `\\${character}` : character
+}
+
+function formatMembers(ranges: Ranges): string {
+  return ranges
+    .map(([low, high]) => {
+      const start = escape(low, CLASS_SPECIALS)
+      const end = high - low > 1 ? `-${escape(high, CLASS_SPECIALS)}` : escape(high, CLASS_SPECIALS)
+      return low === high ? start : start + end
+    })
+    .join('')
+}
+
+/** Emit the simplest unit for a set: nothing, a literal, `?`, or a class, negated when the set reaches the last byte. */
+function formatRanges(ranges: Ranges): string[] {
+  if (ranges.length === 0) {
+    return []
+  }
+  if (ranges.length === 1 && ranges[0][0] === ranges[0][1]) {
+    return [escape(ranges[0][0], LITERAL_SPECIALS)]
+  }
+  if (ranges.at(-1)?.[1] !== MAX_BYTE) {
+    return [`[${formatMembers(ranges)}]`]
+  }
+  const excluded = subtract(complement(ranges), SLASH)
+  return [excluded.length === 0 ? '?' : `[^${formatMembers(excluded)}]`]
 }
 
 function meetCharacters(left: string, right: string): string[] {
-  if (left === '?' || right === '?') {
-    return [left === '?' ? right : left]
-  }
-  return left.replace(/^\\/u, '') === right.replace(/^\\/u, '') ? [left] : []
+  return formatRanges(intersectRanges(toRanges(left), toRanges(right)))
 }
 
 const characters: Level = {
@@ -298,4 +543,124 @@ function intersectSequences(
   }
 
   return visit(0, 0).map(suffix => join(suffix.slice(separator.length)))
+}
+
+const encoder = new TextEncoder()
+const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
+
+function toBytes(value: string): string {
+  return Array.from(encoder.encode(value), byte => String.fromCodePoint(byte)).join('')
+}
+
+/** A UTF-8 glob cannot contain an isolated high byte. Classes can name it by excluding the other valid bytes. */
+function serialize(pattern: string, budget: Budget): string[] {
+  const decoded = decode(pattern)
+  if (decoded !== undefined) {
+    return [decoded]
+  }
+  const tokens = tokenize(pattern)
+  let result = ['']
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i]
+    let alternatives = [decode(token)]
+    if (!token.startsWith('[') && codePoint(token) >= 128) {
+      let run = token
+      while (
+        i + 1 < tokens.length &&
+        !tokens[i + 1].startsWith('[') &&
+        codePoint(tokens[i + 1]) >= 128
+      ) {
+        run += tokens[++i]
+      }
+      const text = decode(run)
+      if (text === undefined) {
+        // Separate byte classes preserve constraints that stop halfway through a Unicode character.
+        const members = tokenize(run).map(unit => byteClass(toRanges(unit), budget).at(0))
+        alternatives = members.every(member => member !== undefined) ? [members.join('')] : []
+      } else {
+        alternatives = [text]
+      }
+    } else if (alternatives[0] === undefined) {
+      alternatives = byteClass(toRanges(token), budget)
+    }
+    const next = new Set<string>()
+    for (const prefix of result) {
+      for (const suffix of alternatives) {
+        if (suffix !== undefined) {
+          add(next, prefix + suffix, budget)
+        }
+      }
+    }
+    result = [...next]
+  }
+  return result
+}
+
+function decode(bytes: string): string | undefined {
+  try {
+    return decoder.decode(Uint8Array.from(bytes, character => character.codePointAt(0) ?? 0))
+  } catch {
+    return undefined
+  }
+}
+
+/** Cover a byte set with UTF-8 characters whose encoded bytes all belong to it. */
+function byteMembers(bytes: Set<number>, budget: Budget): string | undefined {
+  const members = new Set<string>()
+  const covered = new Set<number>()
+  // Continuation bytes are 128–191; valid leading bytes are 194–244.
+  const continuation = [...bytes].filter(byte => byte >= 128 && byte <= 191)
+  for (const byte of bytes) {
+    budget.step()
+    if (byte < 128) {
+      members.add(escape(byte, CLASS_SPECIALS))
+      covered.add(byte)
+    }
+  }
+  for (const lead of bytes) {
+    if (lead < 194 || lead > 244) {
+      continue
+    }
+    const length = lead < 224 ? 2 : lead < 240 ? 3 : 4
+    // These second-byte bounds exclude overlong encodings, surrogate code points, and values above U+10FFFF.
+    const low = lead === 224 ? 160 : lead === 240 ? 144 : 128
+    const high = lead === 237 ? 159 : lead === 244 ? 143 : 191
+    const seconds = continuation.filter(byte => byte >= low && byte <= high)
+    for (const byte of continuation) {
+      if (!seconds.includes(byte) && (length === 2 || seconds.length === 0)) {
+        continue
+      }
+      const sequence = [lead, seconds.includes(byte) ? byte : seconds[0]]
+      while (sequence.length < length) {
+        sequence.push(byte)
+      }
+      if (sequence.every(value => covered.has(value))) {
+        continue
+      }
+      members.add(decoder.decode(new Uint8Array(sequence)))
+      for (const value of sequence) {
+        covered.add(value)
+      }
+    }
+  }
+  return [...bytes].every(byte => covered.has(byte)) ? [...members].join('') : undefined
+}
+
+function byteClass(ranges: Ranges, budget: Budget): string[] {
+  // These are the only bytes that can occur in a JavaScript string encoded as UTF-8.
+  const valid = Array.from({ length: 245 }, (_, byte) => byte).filter(
+    byte => byte !== 47 && byte !== 192 && byte !== 193
+  )
+  const included = new Set(
+    valid.filter(byte => ranges.some(([low, high]) => low <= byte && byte <= high))
+  )
+  const positive = byteMembers(included, budget)
+  if (positive !== undefined) {
+    return included.size === 0 ? [] : [`[${positive}]`]
+  }
+  const negative = byteMembers(new Set(valid.filter(byte => !included.has(byte))), budget)
+  if (negative !== undefined) {
+    return [`[^${negative}]`]
+  }
+  return [...included].flatMap(byte => byteClass([[byte, byte]], budget))
 }
