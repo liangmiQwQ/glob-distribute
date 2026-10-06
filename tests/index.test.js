@@ -221,3 +221,24 @@ test('keeps wildcard language semantics across brace globstars', () => {
   expect(matchesList(distribute(['*a{**}/', 'aa']), 'aa')).toBe(true)
   expect(matchesList(distribute(['*', '!*a{**}/']), 'aa')).toBe(false)
 })
+
+// A failed class scan must not restart at every later opening bracket.
+test('handles long closed and unclosed character classes', () => {
+  expect(distribute([`[${'a'.repeat(20_000)}]`])).toEqual(['a'])
+  expect(() => distribute(['['.repeat(100_000)])).toThrow('Unclosed character class in glob')
+  expect(distribute(['[[]'])).toEqual([String.raw`\[`])
+  expect(distribute(['[]]'])).toEqual([String.raw`\]`])
+  expect(distribute([String.raw`[a\]]`])).toEqual([String.raw`[\]a]`])
+  expect(distribute(['[!]]'])).toEqual([String.raw`[^\]]`])
+})
+
+// Repeated stars used to tokenize every growing prefix; escaped stars must still remain literals.
+test('normalizes long wildcard patterns without rescanning prefixes', () => {
+  const pattern = 'a*'.repeat(10_000)
+  expect(distribute([pattern])).toEqual([pattern])
+  expect(distribute([String.raw`\*{*,**/x}`])).toEqual([
+    String.raw`\**`,
+    String.raw`\*x`,
+    String.raw`\**/**/x`
+  ])
+})

@@ -119,14 +119,34 @@ function add(target: Set<string>, value: string, budget: Budget): void {
 }
 
 const ESCAPED = String.raw`\\[\s\S]`
-// A class is one token so braces and separators never see its members.
-// As in fast-glob a leading `!` or `^` always negates and the first member is literal, so `[!]` and `[]` stay unclosed.
-const CLASS = String.raw`\[(?:[!^](?:${ESCAPED}|[^\\])|${ESCAPED}|[^!^\\])(?:${ESCAPED}|[^\]\\])*\]`
-const TOKEN = new RegExp(`${ESCAPED}|${CLASS}|[^]`, 'gu')
 const CHARACTER = new RegExp(`${ESCAPED}|[^]`, 'gu')
 
 function tokenize(pattern: string): string[] {
-  return pattern.match(TOKEN) ?? []
+  const characters = pattern.match(CHARACTER) ?? []
+  const tokens: string[] = []
+  let classesPossible = true
+  for (let i = 0; i < characters.length; i += 1) {
+    if (characters[i] === '[' && classesPossible) {
+      let first = i + 1
+      if (characters[first] === '!' || characters[first] === '^') {
+        first += 1
+      }
+      // The first member is literal, even when it is ]; escaped characters are already single units.
+      let end = first + 1
+      while (end < characters.length && characters[end] !== ']') {
+        end += 1
+      }
+      if (end < characters.length) {
+        tokens.push(characters.slice(i, end + 1).join(''))
+        i = end
+        continue
+      }
+      // No closing bracket remains for any later opener. Emit ordinary tokens without rescanning the suffix.
+      classesPossible = false
+    }
+    tokens.push(characters[i])
+  }
+  return tokens
 }
 
 interface Token {
@@ -275,22 +295,27 @@ function normalize(tokens: Token[], source: string, budget: Budget): string[] {
     }
   }
 
-  let result = ['']
+  let result = new Map([['', false]])
   for (const unit of units) {
-    const next = new Set<string>()
-    for (const prefix of result) {
+    const next = new Map<string, boolean>()
+    function append(prefix: string, endsWithStar: boolean): void {
+      budget.step()
+      next.set(prefix, endsWithStar)
+      budget.check(next.size)
+    }
+    for (const [prefix, endsWithStar] of result) {
       // A brace branch can start ** in the middle of a segment. Split its zero-directory and recursive cases.
       if ((unit === '**/' || unit === '**') && prefix !== '' && !prefix.endsWith('/')) {
-        const starred = tokenize(prefix).at(-1) === '*' ? prefix : `${prefix}*`
-        add(next, unit === '**' ? starred : prefix, budget)
-        add(next, `${starred}/${unit}`, budget)
+        const starred = endsWithStar ? prefix : `${prefix}*`
+        append(unit === '**' ? starred : prefix, unit === '**' || endsWithStar)
+        append(`${starred}/${unit}`, unit === '**')
       } else {
-        add(next, unit === '*' && tokenize(prefix).at(-1) === '*' ? prefix : prefix + unit, budget)
+        append(unit === '*' && endsWithStar ? prefix : prefix + unit, unit === '*' || unit === '**')
       }
     }
-    result = [...next]
+    result = next
   }
-  return result
+  return [...result.keys()]
 }
 
 /** Sorted, disjoint inclusive byte ranges. Every single-character unit is a set, so one intersection serves them all. */
