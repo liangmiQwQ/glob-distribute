@@ -21,6 +21,13 @@ distribute(['*a*', '*b*'])
 
 distribute(['src/*.ts', 'test/*.ts'])
 // []
+
+// A leading `!` negates a term. Complements are not globs, so they stay as `!` entries.
+distribute(['**/*.{js,ts}', '!**/*.test.*'])
+// ['**/*.js', '**/*.ts', '!**/*.test.*']
+
+distribute(['{a,b,c}', '!b'])
+// ['a', 'c']
 ```
 
 ## API
@@ -29,9 +36,11 @@ distribute(['src/*.ts', 'test/*.ts'])
 distribute(patterns: readonly string[], options?: DistributeOptions): string[]
 ```
 
-The input is a conjunction, not a list of include/exclude rules. The output contains deduplicated, brace-expanded alternatives. Inputs are not mutated. Alternatives can overlap and are not guaranteed to be minimal or sorted. No filesystem access occurs.
+The input is a conjunction: every pattern must match, and a pattern with a leading `!` must not match. The output contains deduplicated, brace-expanded alternatives, followed by any `!` terms that still matter. A string matches the output when it matches some alternative and no `!` term. Inputs are not mutated. Alternatives can overlap and are not guaranteed to be minimal or sorted. No filesystem access occurs.
 
 An impossible intersection returns `[]`. An empty conjunction matches everything and returns `['**']`. An empty pattern matches only the empty string, so `distribute([''])` returns `['']`.
+
+Negated terms are kept verbatim after brace expansion rather than distributed, because the complement of a glob is not expressible in this dialect. Alternatives that a negated term fully covers are dropped, as are negated terms that cannot overlap any remaining alternative. Repeated leading `!` toggles, so `!!a` is `a`.
 
 ## Glob dialect
 
@@ -44,10 +53,11 @@ This uses the small, permissive dialect of [glob-intersection](https://github.co
 | `?`                    | Exactly one Unicode code point except `/`                     |
 | `{a,b}`                | Alternatives; nesting and empty branches are supported        |
 | `\*`, `\?`, `\{`, etc. | A literal escaped character                                   |
+| `!pattern`             | Negation; only valid at the start of a pattern                |
 
 Matching is case-sensitive. Wildcards include dotfiles and newlines. Paths use `/`; backslashes escape characters and are not Windows separators. Slashes are literal: `**/file` requires a slash and does not match `file`. For optional directories, use `{,**/}file`.
 
-Character classes, extglobs, and negation are unsupported: unescaped `[`, `]`, `(`, `)`, and `!` throw `SyntaxError`, as do malformed braces and dangling escapes. Braces group alternatives only; range notation is not expanded (`{1..3}` matches the literal text `1..3`). Escape braces to match them literally.
+Character classes and extglobs are unsupported: unescaped `[`, `]`, `(`, `)`, and `!` after the first character throw `SyntaxError`, as do malformed braces and dangling escapes. Braces group alternatives only; range notation is not expanded (`{1..3}` matches the literal text `1..3`). Escape braces to match them literally.
 
 These semantics are deliberately explicit: outputs must be consumed by a matcher using the same dialect. Standard filesystem globbers often assign different meanings to dotfiles and `**`.
 
