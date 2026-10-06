@@ -1,6 +1,7 @@
 import { expect, expectTypeOf, test } from 'vite-plus/test'
 
 import { distribute } from '../src/index.ts'
+import fixture from './fixtures/fast-glob.json' with { type: 'json' }
 
 // Public examples cover AND inputs and OR outputs, including nested and empty alternatives.
 test('distributes conjunctions into equivalent alternatives', () => {
@@ -15,6 +16,16 @@ test('distributes conjunctions into equivalent alternatives', () => {
   expectTypeOf(distribute(['*'])).toEqualTypeOf(/** @type {string[]} */ ([]))
 })
 
+// `**` spans directories only as a whole segment, and a trailing `**` needs at least one segment, as in fast-glob.
+test('treats `**` as a segment wildcard', () => {
+  expect(distribute(['**/file', 'file'])).toEqual(['file'])
+  expect(distribute(['src/**', '**/*.ts'])).toEqual(['src/**/*.ts'])
+  expect(distribute(['a/**', 'a'])).toEqual([])
+  expect(distribute(['a/**', 'a/'])).toEqual(['a/'])
+  expect(distribute(['a**b', '**'])).toEqual(['a*b'])
+  expect(distribute(['**/**/x', String.raw`a\/**`])).toEqual(['a/**/x'])
+})
+
 // A leading `!` negates a term; complements are not globs, so they stay as `!` entries after the alternatives.
 test('keeps negated terms and drops alternatives they fully exclude', () => {
   expect(distribute(['**/*.js', '!**/*.test.js'])).toEqual(['**/*.js', '!**/*.test.js'])
@@ -27,20 +38,14 @@ test('keeps negated terms and drops alternatives they fully exclude', () => {
   expect(distribute([String.raw`\!a`])).toEqual([String.raw`\!a`])
 })
 
-// This oracle translates the documented syntax to regex, independently of the intersection algorithm.
+// This oracle translates the documented segment semantics to regex, independently of the intersection algorithm.
 const matchers = new Map()
 
-/** @param {string} pattern */
-function matcher(pattern) {
-  if (matchers.has(pattern)) {
-    return matchers.get(pattern)
-  }
-  const tokens = pattern.match(/\\[\s\S]|\*\*|[^]/gu) ?? []
-  const expression = tokens
+/** @param {string} segment */
+function segmentExpression(segment) {
+  const tokens = segment.match(/\\[\s\S]|[^]/gu) ?? []
+  return tokens
     .map(token => {
-      if (token === '**') {
-        return String.raw`[\s\S]*`
-      }
       if (token === '*') {
         return '[^/]*'
       }
@@ -50,15 +55,27 @@ function matcher(pattern) {
       return token.replace(/^\\/u, '').replaceAll(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`)
     })
     .join('')
+}
+
+/** `**` matches zero or more whole segments, and a trailing `**` needs a segment, like `**\/*`. @param {string} pattern */
+function matcher(pattern) {
+  if (matchers.has(pattern)) {
+    return matchers.get(pattern)
+  }
+  const segments = pattern.replace(/(^|\/)\*\*$/u, '$1**/*').split('/')
+  const expression = segments
+    .map(segment => (segment === '**' ? '(?:[^/]*/)*' : `${segmentExpression(segment)}/`))
+    .join('')
+    .slice(0, -1)
   const regex = new RegExp(`^(?:${expression})$(?!.)`, 'su')
   matchers.set(pattern, regex)
   return regex
 }
 
-/** A `!` pattern is satisfied when its body does not match. @param {string} pattern @param {string} value */
+/** A `!` pattern is satisfied when its body does not match. @param {string} pattern @param {string} value @returns {boolean} */
 function satisfies(pattern, value) {
   return pattern.startsWith('!')
-    ? !matcher(pattern.slice(1)).test(value)
+    ? !satisfies(pattern.slice(1), value)
     : matcher(pattern).test(value)
 }
 
@@ -109,6 +126,16 @@ test('preserves matching semantics across wildcard overlaps and separators', () 
     const expected = candidates.filter(value => inputs.every(pattern => satisfies(pattern, value)))
     const actual = candidates.filter(value => matchesList(output, value))
     expect(actual, JSON.stringify({ inputs, output })).toEqual(expected)
+  }
+})
+
+// The fixture holds fast-glob's own verdicts, so the oracle above and the expansion agree with the reference matcher.
+test('matches like fast-glob on every fixture pattern', () => {
+  for (const [pattern, bits] of Object.entries(fixture.matches)) {
+    const output = distribute([pattern])
+    const expected = fixture.paths.filter((_, i) => bits[i] === '1')
+    const actual = fixture.paths.filter(value => matchesList(output, value))
+    expect(actual, JSON.stringify({ pattern, output })).toEqual(expected)
   }
 })
 
