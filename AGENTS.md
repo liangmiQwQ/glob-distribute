@@ -6,8 +6,6 @@ glob-distribute converts glob AND expressions into OR alternatives for tools tha
 
 Vite+ is used as the project manager and dev toolchain for JavaScript part. Check `node_modules/vite-plus/docs` if you don't know how to use Vite+ features. When you find yourself needing a dev tool a tool is missing, you can check Vite+'s document first.
 
-Source code is TypeScript; keep the public entry in `src/index.ts`. Let `vp pack` build the JavaScript output and type declarations.
-
 ## Rules
 
 Keep JavaScript dependency versions in the default catalog in `pnpm-workspace.yaml`, and reference them with `catalog:` in package manifests.
