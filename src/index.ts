@@ -5,6 +5,13 @@ export interface DistributeOptions {
   maxOperations?: number
 }
 
+export interface DistributeResult {
+  /** Match any of these patterns to include a path. */
+  include: string[]
+  /** Match any of these patterns to exclude a path; no leading negation operator. */
+  exclude: string[]
+}
+
 interface Budget {
   step: () => void
   check: (size: number) => void
@@ -22,8 +29,11 @@ interface Level {
   meet: (left: string, right: string, budget: Budget) => string[]
 }
 
-/** Return glob alternatives matching every input pattern. No filesystem access is performed. */
-export function distribute(patterns: readonly string[], options: DistributeOptions = {}): string[] {
+/** Return inclusion and exclusion unions matching every input pattern. No filesystem access is performed. */
+export function distribute(
+  patterns: readonly string[],
+  options: DistributeOptions = {}
+): DistributeResult {
   const budget = createBudget(options)
   if (!Array.isArray(patterns) || patterns.some(pattern => typeof pattern !== 'string')) {
     throw new TypeError('Expected an array of glob strings')
@@ -60,22 +70,15 @@ export function distribute(patterns: readonly string[], options: DistributeOptio
     }
   }
 
-  // 3. A complement is not a glob, so negations stay as `!` terms; only redundant ones are removed.
+  // 3. Keep exclusion bodies in their own union; remove only redundant terms.
   const kept = result.filter(pattern => !excluded.some(negated => covers(negated, pattern, budget)))
   const negations = excluded.filter(negated =>
     kept.some(pattern => intersect(pattern, negated, budget).length > 0)
   )
-  const output = new Set(kept)
-  for (const negated of negations) {
-    add(output, `!${negated}`, budget)
-  }
-  const serialized = new Set<string>()
-  for (const pattern of output) {
-    for (const value of serialize(pattern, budget)) {
-      add(serialized, value, budget)
-    }
-  }
-  return [...serialized]
+  const include = serializePatterns(kept, budget)
+  const exclude = serializePatterns(negations, budget)
+  budget.check(include.length + exclude.length)
+  return { include, exclude }
 }
 
 /** Collapse leading `!` so `!!a` is `a`, and `!!!a` is `!a`. */
@@ -550,6 +553,16 @@ const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
 
 function toBytes(value: string): string {
   return Array.from(encoder.encode(value), byte => String.fromCodePoint(byte)).join('')
+}
+
+function serializePatterns(patterns: string[], budget: Budget): string[] {
+  const result = new Set<string>()
+  for (const pattern of patterns) {
+    for (const value of serialize(pattern, budget)) {
+      add(result, value, budget)
+    }
+  }
+  return [...result]
 }
 
 /** A UTF-8 glob cannot contain an isolated high byte. Classes can name it by excluding the other valid bytes. */

@@ -23,7 +23,7 @@ function measure(run: () => unknown): number {
   return performance.now() - start
 }
 
-// The baseline returns compressed braces; distribute materializes all OR alternatives.
+// The baseline returns compressed braces; distribute materializes separate include/exclude OR groups.
 // oxlint-disable-next-line no-console -- The benchmark reports timings to the terminal.
 console.table(
   cases.map(([left, right]) => {
