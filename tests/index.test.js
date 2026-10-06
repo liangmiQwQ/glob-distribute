@@ -1,6 +1,6 @@
 import { expect, expectTypeOf, test } from 'vite-plus/test'
 
-import { distribute } from '../src/index.js'
+import { distribute } from '../src/index.ts'
 
 // Public examples cover AND inputs and OR outputs, including nested and empty alternatives.
 test('distributes conjunctions into equivalent alternatives', () => {

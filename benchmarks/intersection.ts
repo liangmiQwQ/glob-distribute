@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module'
 import { performance } from 'node:perf_hooks'
 
-import { distribute } from '../src/index.js'
+import { distribute } from '../src/index.ts'
 
 const require = createRequire(import.meta.url)
 const intersect = require('glob-intersection') as (left: string, right: string) => string | false
