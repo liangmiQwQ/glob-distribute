@@ -38,16 +38,13 @@ test('keeps negated terms and drops alternatives they fully exclude', () => {
   expect(distribute([String.raw`\!a`])).toEqual([String.raw`\!a`])
 })
 
-// This oracle encodes the documented segment semantics independently of the intersection algorithm.
+// This oracle translates the documented segment semantics to regex, independently of the intersection algorithm.
 const matchers = new Map()
 
 /** @param {string} segment */
-function segmentMatcher(segment) {
-  if (matchers.has(segment)) {
-    return matchers.get(segment)
-  }
+function segmentExpression(segment) {
   const tokens = segment.match(/\\[\s\S]|[^]/gu) ?? []
-  const expression = tokens
+  return tokens
     .map(token => {
       if (token === '*') {
         return '[^/]*'
@@ -58,31 +55,28 @@ function segmentMatcher(segment) {
       return token.replace(/^\\/u, '').replaceAll(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`)
     })
     .join('')
+}
+
+/** `**` matches zero or more whole segments, and a trailing `**` needs a segment, like `**\/*`. @param {string} pattern */
+function matcher(pattern) {
+  if (matchers.has(pattern)) {
+    return matchers.get(pattern)
+  }
+  const segments = pattern.replace(/(^|\/)\*\*$/u, '$1**/*').split('/')
+  const expression = segments
+    .map(segment => (segment === '**' ? '(?:[^/]*/)*' : `${segmentExpression(segment)}/`))
+    .join('')
+    .slice(0, -1)
   const regex = new RegExp(`^(?:${expression})$(?!.)`, 'su')
-  matchers.set(segment, regex)
+  matchers.set(pattern, regex)
   return regex
 }
 
-/** `**` matches zero or more whole segments; any other segment matches exactly one. @param {string[]} pattern @param {string[]} path @returns {boolean} */
-function matchesSegments(pattern, path) {
-  const head = pattern.at(0)
-  const rest = pattern.slice(1)
-  if (head === undefined) {
-    return path.length === 0
-  }
-  if (head === '**') {
-    return path.some((_, i) => matchesSegments(rest, path.slice(i))) || matchesSegments(rest, [])
-  }
-  return (
-    path.length > 0 && segmentMatcher(head).test(path[0]) && matchesSegments(rest, path.slice(1))
-  )
-}
-
-/** A `!` pattern is satisfied when its body does not match; a trailing `**` needs a segment, like `**\/*`. @param {string} pattern @param {string} value @returns {boolean} */
+/** A `!` pattern is satisfied when its body does not match. @param {string} pattern @param {string} value @returns {boolean} */
 function satisfies(pattern, value) {
   return pattern.startsWith('!')
     ? !satisfies(pattern.slice(1), value)
-    : matchesSegments(pattern.replace(/(^|\/)\*\*$/u, '$1**/*').split('/'), value.split('/'))
+    : matcher(pattern).test(value)
 }
 
 /** An output list matches when some alternative matches and every `!` term is satisfied. @param {string[]} output @param {string} value */
