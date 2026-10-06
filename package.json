@@ -36,7 +36,6 @@
   "devDependencies": {
     "@liangmi/vp-config": "catalog:",
     "@types/node": "catalog:",
-    "@typescript/native-preview": "catalog:",
     "bumpp": "catalog:",
     "glob-intersection": "catalog:",
     "typescript": "catalog:",
