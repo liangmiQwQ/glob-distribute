@@ -1,7 +1,7 @@
-import picomatch from 'picomatch'
 import { expect, expectTypeOf, test } from 'vite-plus/test'
 
 import { distribute } from '../src/index.ts'
+import fixture from './fixtures/fast-glob.json' with { type: 'json' }
 
 // Public examples cover AND inputs and OR outputs, including nested and empty alternatives.
 test('distributes conjunctions into equivalent alternatives', () => {
@@ -16,15 +16,14 @@ test('distributes conjunctions into equivalent alternatives', () => {
   expectTypeOf(distribute(['*'])).toEqualTypeOf(/** @type {string[]} */ ([]))
 })
 
-// `**` spans directories only as a whole segment, matching zero or more of them, as standard globbers do.
-test('treats `**` as a segment wildcard and single-element braces as literal text', () => {
+// `**` spans directories only as a whole segment, and a trailing `**` needs at least one segment, as in fast-glob.
+test('treats `**` as a segment wildcard', () => {
   expect(distribute(['**/file', 'file'])).toEqual(['file'])
-  expect(distribute(['src/**/*.ts', 'src/*.ts'])).toEqual(['src/*.ts'])
-  expect(distribute(['a/**', 'a'])).toEqual(['a'])
+  expect(distribute(['src/**', '**/*.ts'])).toEqual(['src/**/*.ts'])
+  expect(distribute(['a/**', 'a'])).toEqual([])
+  expect(distribute(['a/**', 'a/'])).toEqual(['a/'])
   expect(distribute(['a**b', '**'])).toEqual(['a*b'])
   expect(distribute(['**/**/x', String.raw`a\/**`])).toEqual(['a/**/x'])
-  expect(distribute(['{a}', '{a,b}'])).toEqual([])
-  expect(distribute(['{a}', String.raw`\{a\}`])).toEqual(['{a}'])
 })
 
 // A leading `!` negates a term; complements are not globs, so they stay as `!` entries after the alternatives.
@@ -79,11 +78,11 @@ function matchesSegments(pattern, path) {
   )
 }
 
-/** A `!` pattern is satisfied when its body does not match. @param {string} pattern @param {string} value @returns {boolean} */
+/** A `!` pattern is satisfied when its body does not match; a trailing `**` needs a segment, like `**\/*`. @param {string} pattern @param {string} value @returns {boolean} */
 function satisfies(pattern, value) {
   return pattern.startsWith('!')
     ? !satisfies(pattern.slice(1), value)
-    : matchesSegments(pattern.split('/'), value.split('/'))
+    : matchesSegments(pattern.replace(/(^|\/)\*\*$/u, '$1**/*').split('/'), value.split('/'))
 }
 
 /** An output list matches when some alternative matches and every `!` term is satisfied. @param {string[]} output @param {string} value */
@@ -136,27 +135,13 @@ test('preserves matching semantics across wildcard overlaps and separators', () 
   }
 })
 
-// Spot-check the documented semantics against picomatch, the matcher behind fast-glob, globby, and tinyglobby.
-test('agrees with picomatch on ordinary relative paths', () => {
-  const fixtures = [
-    ['**/*.ts', '!**/*.test.ts'],
-    ['src/**', '**/*.{js,ts}'],
-    ['a/**/b', '**/b/**'],
-    ['**/x', 'a/*/x'],
-    ['a**b', '**'],
-    ['*.?s', '!*.{j,t}s']
-  ]
-  // Picomatch ignores slashes at the path edges and never lets wildcards match a bare `.` segment.
-  const candidates = words(['a', 'b', '.', 'x', 'ts', 'js', '/'], 4).filter(
-    value => value !== '' && !/^\/|\/$|\/\/|(?:^|\/)\.(?:\/|$)/u.test(value)
-  )
-  for (const inputs of fixtures) {
-    const output = distribute(inputs)
-    for (const value of candidates) {
-      const expected = inputs.every(pattern => picomatch(pattern, { dot: true })(value))
-      const actual = matchesList(output, value)
-      expect(actual, JSON.stringify({ inputs, output, value })).toBe(expected)
-    }
+// The fixture holds fast-glob's own verdicts, so the oracle above and the expansion agree with the reference matcher.
+test('matches like fast-glob on every fixture pattern', () => {
+  for (const [pattern, bits] of Object.entries(fixture.matches)) {
+    const output = distribute([pattern])
+    const expected = fixture.paths.filter((_, i) => bits[i] === '1')
+    const actual = fixture.paths.filter(value => matchesList(output, value))
+    expect(actual, JSON.stringify({ pattern, output })).toEqual(expected)
   }
 })
 

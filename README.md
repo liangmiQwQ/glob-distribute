@@ -44,7 +44,7 @@ Negated terms are kept verbatim after brace expansion rather than distributed, b
 
 ## Glob dialect
 
-Patterns follow the common globstar dialect shared by Bash's `globstar`, [picomatch](https://github.com/micromatch/picomatch), and [minimatch](https://github.com/isaacs/minimatch), with dotfiles included:
+Patterns follow [fast-glob](https://github.com/oxc-project/fast-glob), the Rust matcher used by Oxc, which shares the common globstar dialect:
 
 | Syntax                 | Meaning                                                          |
 | ---------------------- | ---------------------------------------------------------------- |
@@ -55,11 +55,13 @@ Patterns follow the common globstar dialect shared by Bash's `globstar`, [picoma
 | `\*`, `\?`, `\{`, etc. | A literal escaped character                                      |
 | `!pattern`             | Negation; only valid at the start of a pattern                   |
 
-A path is a sequence of `/`-separated segments. `**/file` matches `file`, `a/file`, and `a/b/file`; `a/**/b` matches `a/b`; `a/**` matches `a` and everything below it, as picomatch does. Elsewhere `**` is a single-segment wildcard, so `a**b` is normalized to `a*b`. Matching is case-sensitive and wildcards include dotfiles and newlines, like `{ dot: true }` in picomatch. Backslashes escape characters and are not Windows separators. A trailing slash is significant: `a/` matches only `a/`.
+A path is a sequence of `/`-separated segments. `**/file` matches `file`, `a/file`, and `a/b/file`, and `a/**/b` matches `a/b`. A trailing `**` needs at least one segment: `a/**` matches `a/` and everything below it, but not `a`. Elsewhere `**` is a single-segment wildcard, so `a**b` is normalized to `a*b`. Matching is case-sensitive and wildcards include dotfiles and newlines. Backslashes escape characters and are not Windows separators. A trailing slash is significant: `a/` matches only `a/`.
 
-Character classes and extglobs are unsupported: unescaped `[`, `]`, `(`, `)`, and `!` after the first character throw `SyntaxError`, as do malformed braces and dangling escapes. Braces group alternatives only: `{a}` and `{1..3}` match their literal text. Escape braces to match them literally.
+One deliberate difference: `?` matches a Unicode code point here, while fast-glob matches a single byte, so `?` never matches a non-ASCII character there.
 
-Outputs are globs in the same dialect, so any matcher with these semantics consumes them directly.
+Character classes and extglobs are unsupported: unescaped `[`, `]`, `(`, `)`, and `!` after the first character throw `SyntaxError`, as do malformed braces and dangling escapes. Braces group alternatives only, so `{a}` matches `a` and range notation is not expanded (`{1..3}` matches the literal text `1..3`). Escape braces to match them literally.
+
+Outputs are globs in the same dialect, so fast-glob and matchers with the same semantics consume them directly. The test suite checks the semantics against verdicts recorded from fast-glob itself.
 
 ## Limits
 

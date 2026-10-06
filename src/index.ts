@@ -18,6 +18,7 @@ interface Level {
   star: string
   separator: string
   split: (pattern: string) => string[]
+  join: (pattern: string) => string
   meet: (left: string, right: string, budget: Budget) => string[]
 }
 
@@ -135,9 +136,7 @@ function parse(pattern: string, budget: Budget): string[] {
       let alternatives = [token]
       if (token === '{') {
         const choices = new Set<string>()
-        let branches = 0
         for (;;) {
-          branches += 1
           for (const choice of sequence(true)) {
             add(choices, choice, budget)
           }
@@ -149,8 +148,7 @@ function parse(pattern: string, budget: Budget): string[] {
             throw new SyntaxError('Unclosed brace in glob')
           }
         }
-        // Standard globbers only expand braces that list alternatives: `{a}` matches the literal text.
-        alternatives = branches === 1 ? [...choices].map(choice => `{${choice}}`) : [...choices]
+        alternatives = [...choices]
       } else if (['}', '[', ']', '(', ')', '!'].includes(token) || token === '\\') {
         throw new SyntaxError(`Unsupported or unescaped glob token: ${token}`)
       }
@@ -203,12 +201,20 @@ function meetCharacters(left: string, right: string): string[] {
   return left.replace(/^\\/u, '') === right.replace(/^\\/u, '') ? [left] : []
 }
 
-const characters: Level = { star: '*', separator: '', split: tokenize, meet: meetCharacters }
+const characters: Level = {
+  star: '*',
+  separator: '',
+  split: tokenize,
+  join: pattern => pattern,
+  meet: meetCharacters
+}
 
+// A trailing `**` needs at least one segment in fast-glob, so `a/**` matches `a/` but not `a`: it is `**/*` inside the engine.
 const segments: Level = {
   star: '**',
   separator: '/',
-  split: pattern => pattern.split('/'),
+  split: pattern => pattern.replace(/(^|\/)\*\*$/u, '$1**/*').split('/'),
+  join: pattern => pattern.replace(/(^|\/)\*\*\/\*$/u, '$1**'),
   meet: (left, right, budget) => intersectSequences(left, right, characters, budget)
 }
 
@@ -232,7 +238,7 @@ function intersectSequences(
   level: Level,
   budget: Budget
 ): string[] {
-  const { star, separator, split, meet } = level
+  const { star, separator, split, join, meet } = level
   if (leftPattern === rightPattern || rightPattern === star) {
     return [leftPattern]
   }
@@ -291,5 +297,5 @@ function intersectSequences(
     return alternatives
   }
 
-  return visit(0, 0).map(suffix => suffix.slice(separator.length))
+  return visit(0, 0).map(suffix => join(suffix.slice(separator.length)))
 }
