@@ -18,6 +18,10 @@ export function distribute(patterns: readonly string[], options: DistributeOptio
   }
 
   // 1. Parse every input before intersecting so invalid syntax never depends on input order.
+  // Bound recursion depth independently of the configurable expansion budget, before `!` is collapsed.
+  if (patterns.some(pattern => pattern.length > 512)) {
+    throw new RangeError('Glob patterns must not exceed 512 UTF-16 code units')
+  }
   const included: string[][][] = []
   const excluded: string[][] = []
   for (const pattern of new Set(patterns.map(stripNegation))) {
@@ -56,7 +60,11 @@ export function distribute(patterns: readonly string[], options: DistributeOptio
   const negations = [...new Set(excluded.map(negated => negated.join('')))].filter(negated =>
     kept.some(pattern => intersect(tokenize(pattern), tokenize(negated), budget).length > 0)
   )
-  return [...kept, ...negations.map(negated => `!${negated}`)]
+  const output = new Set(kept)
+  for (const negated of negations) {
+    add(output, `!${negated}`, budget)
+  }
+  return [...output]
 }
 
 /** Collapse leading `!` so `!!a` is `a`, and `!!!a` is `!a`. */
@@ -102,10 +110,6 @@ function tokenize(pattern: string): string[] {
 }
 
 function parse(pattern: string, budget: Budget): string[][] {
-  // Bound recursion depth independently of the configurable expansion budget.
-  if (pattern.length > 512) {
-    throw new RangeError('Glob patterns must not exceed 512 UTF-16 code units')
-  }
   const tokens = tokenize(pattern)
   let position = 0
 

@@ -118,7 +118,9 @@ test('rejects unsupported syntax and bounds expansion without returning partial 
   }
   expect(() => distribute(['no', 'match', '[a]'])).toThrow(SyntaxError)
   expect(() => distribute(['a'.repeat(513)])).toThrow(RangeError)
+  expect(() => distribute(['!'.repeat(513)])).toThrow(RangeError)
   expect(() => distribute(['{a,b,c}'], { maxResults: 2 })).toThrow(RangeError)
+  expect(() => distribute(['?', '!a', '!b'], { maxResults: 2 })).toThrow(RangeError)
   expect(() => distribute(['*a*b*', '*c*d*'], { maxOperations: 20 })).toThrow(RangeError)
   expect(() => distribute(['*'], { maxResults: 0 })).toThrow(RangeError)
   expect(() => distribute(['*'], { maxOperations: Infinity })).toThrow(RangeError)
