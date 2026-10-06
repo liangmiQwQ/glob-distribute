@@ -24,6 +24,7 @@
     "access": "public"
   },
   "scripts": {
+    "bench": "node benchmarks/intersection.ts",
     "build": "vp run cpack",
     "check": "vp run ccheck",
     "dev": "vp pack --watch",
@@ -37,6 +38,7 @@
     "@types/node": "catalog:",
     "@typescript/native-preview": "catalog:",
     "bumpp": "catalog:",
+    "glob-intersection": "catalog:",
     "typescript": "catalog:",
     "vite": "catalog:",
     "vite-plus": "catalog:"
