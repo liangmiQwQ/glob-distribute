@@ -116,8 +116,15 @@ function add(target: Set<string>, value: string, budget: Budget): void {
   budget.check(target.size)
 }
 
+const ESCAPED = String.raw`\\[\s\S]`
+// A class is one token so braces and separators never see its members.
+// As in fast-glob a leading `!` or `^` always negates and the first member is literal, so `[!]` and `[]` stay unclosed.
+const CLASS = String.raw`\[(?:[!^](?:${ESCAPED}|[^\\])|${ESCAPED}|[^!^\\])(?:${ESCAPED}|[^\]\\])*\]`
+const TOKEN = new RegExp(`${ESCAPED}|${CLASS}|[^]`, 'gu')
+const CHARACTER = new RegExp(`${ESCAPED}|[^]`, 'gu')
+
 function tokenize(pattern: string): string[] {
-  return pattern.match(/\\[\s\S]|[^]/gu) ?? []
+  return pattern.match(TOKEN) ?? []
 }
 
 /** Expand braces, then normalize each alternative. Returns deduplicated path patterns. */
@@ -149,7 +156,9 @@ function parse(pattern: string, budget: Budget): string[] {
           }
         }
         alternatives = [...choices]
-      } else if (['}', '[', ']', '(', ')', '!'].includes(token) || token === '\\') {
+      } else if (token === '[') {
+        throw new SyntaxError('Unclosed character class in glob')
+      } else if (['}', ']', '(', ')', '!'].includes(token) || token === '\\') {
         throw new SyntaxError(`Unsupported or unescaped glob token: ${token}`)
       }
       const expanded = new Set<string>()
@@ -163,17 +172,26 @@ function parse(pattern: string, budget: Budget): string[] {
     return result
   }
 
-  return [...new Set(sequence(false).map(normalize))]
+  return [...new Set(sequence(false).flatMap(pattern => normalize(pattern) ?? []))]
 }
 
-/** Resolve `**` the way standard globbers do: a whole segment spans directories, anywhere else it is `*`. */
-function normalize(pattern: string): string {
+/**
+ * Resolve `**` the way standard globbers do: a whole segment spans directories, anywhere else it is `*`.
+ * Classes are rewritten to their canonical unit; `undefined` means a class can match nothing, so the pattern is dead.
+ */
+function normalize(pattern: string): string | undefined {
   const segments: string[] = []
   for (const tokens of splitSegments(pattern)) {
+    const units = tokens.flatMap(token =>
+      token.startsWith('[') ? formatRanges(parseClass(token)) : [token]
+    )
+    if (units.length < tokens.length) {
+      return undefined
+    }
     const segment =
-      tokens.join('') === '**'
+      units.join('') === '**'
         ? '**'
-        : tokens.filter((token, i) => token !== '*' || tokens[i - 1] !== '*').join('')
+        : units.filter((unit, i) => unit !== '*' || units[i - 1] !== '*').join('')
     if (segment !== '**' || segments.at(-1) !== '**') {
       segments.push(segment)
     }
@@ -194,11 +212,128 @@ function splitSegments(pattern: string): string[][] {
   return segments
 }
 
-function meetCharacters(left: string, right: string): string[] {
-  if (left === '?' || right === '?') {
-    return [left === '?' ? right : left]
+/** Sorted, disjoint inclusive code point ranges. Every single-character unit is a set, so one intersection serves them all. */
+type Ranges = [number, number][]
+
+// Decimal because the formatter and linter disagree on hex digit case: U+10FFFF and `/`.
+const MAX_CODE_POINT = 1_114_111
+const SLASH: Ranges = [[47, 47]]
+const LITERAL_SPECIALS = new Set(String.raw`\*?[]{}(),!`)
+const CLASS_SPECIALS = new Set(String.raw`\]-^!`)
+const ANY: Ranges = subtract(complement([]), SLASH)
+
+function unescape(token: string): string {
+  return token.replace(/^\\/u, '')
+}
+
+function codePoint(token: string): number {
+  return unescape(token).codePointAt(0) ?? 0
+}
+
+/** Merge overlapping or adjacent ranges into canonical form. */
+function merge(ranges: Ranges): Ranges {
+  const merged: Ranges = []
+  for (const [low, high] of ranges.toSorted((left, right) => left[0] - right[0])) {
+    const last = merged.at(-1)
+    if (last && low <= last[1] + 1) {
+      last[1] = Math.max(last[1], high)
+    } else {
+      merged.push([low, high])
+    }
   }
-  return left.replace(/^\\/u, '') === right.replace(/^\\/u, '') ? [left] : []
+  return merged
+}
+
+function complement(ranges: Ranges): Ranges {
+  const result: Ranges = []
+  let next = 0
+  for (const [low, high] of ranges) {
+    if (low > next) {
+      result.push([next, low - 1])
+    }
+    next = high + 1
+  }
+  if (next <= MAX_CODE_POINT) {
+    result.push([next, MAX_CODE_POINT])
+  }
+  return result
+}
+
+function intersectRanges(left: Ranges, right: Ranges): Ranges {
+  const result: Ranges = []
+  for (const [lowA, highA] of left) {
+    for (const [lowB, highB] of right) {
+      const low = Math.max(lowA, lowB)
+      const high = Math.min(highA, highB)
+      if (low <= high) {
+        result.push([low, high])
+      }
+    }
+  }
+  return result
+}
+
+function subtract(ranges: Ranges, removed: Ranges): Ranges {
+  return intersectRanges(ranges, complement(removed))
+}
+
+/** Mirror fast-glob's class loop: `^`/`!` negates, `-` is a range unless first, last, or escaped; `/` never matches. */
+function parseClass(token: string): Ranges {
+  const negated = /^\[[!^]/u.test(token)
+  const members = token.slice(negated ? 2 : 1, -1).match(CHARACTER) ?? []
+  const ranges: Ranges = []
+  for (let i = 0; i < members.length; i += 1) {
+    const low = codePoint(members[i])
+    const ranged = members[i + 1] === '-' && i + 2 < members.length
+    const high = ranged ? codePoint(members[i + 2]) : low
+    if (low <= high) {
+      ranges.push([low, high])
+    }
+    i += ranged ? 2 : 0
+  }
+  const set = merge(ranges)
+  return subtract(negated ? complement(set) : set, SLASH)
+}
+
+function toRanges(unit: string): Ranges {
+  if (unit === '?') {
+    return ANY
+  }
+  return unit.startsWith('[') ? parseClass(unit) : [[codePoint(unit), codePoint(unit)]]
+}
+
+function escape(code: number, specials: Set<string>): string {
+  const character = String.fromCodePoint(code)
+  return specials.has(character) ? `\\${character}` : character
+}
+
+function formatMembers(ranges: Ranges): string {
+  return ranges
+    .map(([low, high]) => {
+      const start = escape(low, CLASS_SPECIALS)
+      const end = high - low > 1 ? `-${escape(high, CLASS_SPECIALS)}` : escape(high, CLASS_SPECIALS)
+      return low === high ? start : start + end
+    })
+    .join('')
+}
+
+/** Emit the simplest unit for a set: nothing, a literal, `?`, or a class, negated when the set reaches the last code point. */
+function formatRanges(ranges: Ranges): string[] {
+  if (ranges.length === 0) {
+    return []
+  }
+  if (ranges.length === 1 && ranges[0][0] === ranges[0][1]) {
+    return [escape(ranges[0][0], LITERAL_SPECIALS)]
+  }
+  if (ranges.at(-1)?.[1] !== MAX_CODE_POINT) {
+    return [`[${formatMembers(ranges)}]`]
+  }
+  const excluded = subtract(complement(ranges), SLASH)
+  return [excluded.length === 0 ? '?' : `[^${formatMembers(excluded)}]`]
+}
+
+function meetCharacters(left: string, right: string): string[] {
+  return formatRanges(intersectRanges(toRanges(left), toRanges(right)))
 }
 
 const characters: Level = {

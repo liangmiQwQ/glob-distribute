@@ -46,20 +46,23 @@ Negated terms are kept verbatim after brace expansion rather than distributed, b
 
 Patterns follow [fast-glob](https://github.com/oxc-project/fast-glob), the Rust matcher used by Oxc, which shares the common globstar dialect:
 
-| Syntax                 | Meaning                                                          |
-| ---------------------- | ---------------------------------------------------------------- |
-| `*`                    | Zero or more characters within a path segment                    |
-| `**`                   | As a whole segment, zero or more segments; otherwise same as `*` |
-| `?`                    | Exactly one Unicode code point except `/`                        |
-| `{a,b}`                | Alternatives; nesting and empty branches are supported           |
-| `\*`, `\?`, `\{`, etc. | A literal escaped character                                      |
-| `!pattern`             | Negation; only valid at the start of a pattern                   |
+| Syntax                 | Meaning                                                             |
+| ---------------------- | ------------------------------------------------------------------- |
+| `*`                    | Zero or more characters within a path segment                       |
+| `**`                   | As a whole segment, zero or more segments; otherwise same as `*`    |
+| `?`                    | Exactly one Unicode code point except `/`                           |
+| `[ab]`, `[a-z]`        | One code point from the set, except `/`; `[!ab]` or `[^ab]` negates |
+| `{a,b}`                | Alternatives; nesting and empty branches are supported              |
+| `\*`, `\?`, `\{`, etc. | A literal escaped character                                         |
+| `!pattern`             | Negation; only valid at the start of a pattern                      |
 
 A path is a sequence of `/`-separated segments. `**/file` matches `file`, `a/file`, and `a/b/file`, and `a/**/b` matches `a/b`. A trailing `**` needs at least one segment: `a/**` matches `a/` and everything below it, but not `a`. Elsewhere `**` is a single-segment wildcard, so `a**b` is normalized to `a*b`. Matching is case-sensitive and wildcards include dotfiles and newlines. Backslashes escape characters and are not Windows separators. A trailing slash is significant: `a/` matches only `a/`.
 
-One deliberate difference: `?` matches a Unicode code point here, while fast-glob matches a single byte, so `?` never matches a non-ASCII character there.
+Character classes follow fast-glob: the first member is literal even when it is `]`, a `-` that is first, last, or escaped is literal, and `/` never matches, so `[!/]` is `?`. Classes in the output are canonical: a one-member class becomes an escaped literal, members are sorted and merged, and a class that can match nothing drops its alternative.
 
-Character classes and extglobs are unsupported: unescaped `[`, `]`, `(`, `)`, and `!` after the first character throw `SyntaxError`, as do malformed braces and dangling escapes. Braces group alternatives only, so `{a}` matches `a` and range notation is not expanded (`{1..3}` matches the literal text `1..3`). Escape braces to match them literally.
+One deliberate difference: `?` and classes match a Unicode code point here, while fast-glob matches a single byte, so they never match a non-ASCII character there.
+
+Extglobs are unsupported: unescaped `]`, `(`, `)`, and `!` after the first character throw `SyntaxError`, as do unclosed classes, malformed braces and dangling escapes. Braces group alternatives only, so `{a}` matches `a` and range notation is not expanded (`{1..3}` matches the literal text `1..3`). Escape braces to match them literally.
 
 Outputs are globs in the same dialect, so fast-glob and matchers with the same semantics consume them directly. The test suite checks the semantics against verdicts recorded from fast-glob itself.
 

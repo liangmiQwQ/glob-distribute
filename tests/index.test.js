@@ -38,12 +38,44 @@ test('keeps negated terms and drops alternatives they fully exclude', () => {
   expect(distribute([String.raw`\!a`])).toEqual([String.raw`\!a`])
 })
 
+// Classes intersect as code point sets, so the output is a canonical literal, `?`, or class, as fast-glob reads them.
+test('intersects character classes', () => {
+  expect(distribute(['[a-z]', '[^m]'])).toEqual(['[a-ln-z]'])
+  expect(distribute(['[^a]', '[!b]'])).toEqual(['[^ab]'])
+  expect(distribute(['[ab]', 'b'])).toEqual(['b'])
+  expect(distribute(['[ab]', '[cd]'])).toEqual([])
+  expect(distribute(['[*]', '?'])).toEqual([String.raw`\*`])
+  expect(distribute(['[!/]'])).toEqual(['?'])
+  expect(distribute(['[z-a]'])).toEqual([])
+  expect(distribute(['[]a]', '[^a]'])).toEqual([String.raw`\]`])
+  expect(distribute(['{a,c[}]*}', 'c*'])).toEqual([String.raw`c\}*`])
+})
+
 // This oracle translates the documented segment semantics to regex, independently of the intersection algorithm.
 const matchers = new Map()
 
+/** @param {string} token */
+function literal(token) {
+  return token.replace(/^\\/u, '').replaceAll(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`)
+}
+
+/** A class follows fast-glob: `^`/`!` negates, the first member is literal, `-` ranges, and `/` never matches. @param {string} token */
+function classExpression(token) {
+  const negated = /^\[[!^]/u.test(token)
+  const members = token.slice(negated ? 2 : 1, -1).match(/\\[\s\S]|[^]/gu) ?? []
+  const body = members
+    .map((member, i) =>
+      member === '-' && i > 0 && i < members.length - 1
+        ? '-'
+        : `\\u{${(member.replace(/^\\/u, '').codePointAt(0) ?? 0).toString(16)}}`
+    )
+    .join('')
+  return negated ? `[^/${body}]` : `(?!/)[${body}]`
+}
+
 /** @param {string} segment */
 function segmentExpression(segment) {
-  const tokens = segment.match(/\\[\s\S]|[^]/gu) ?? []
+  const tokens = segment.match(/\\[\s\S]|\[[!^]?(?:\\[\s\S]|[^])(?:\\[\s\S]|[^\]])*\]|[^]/gu) ?? []
   return tokens
     .map(token => {
       if (token === '*') {
@@ -52,7 +84,7 @@ function segmentExpression(segment) {
       if (token === '?') {
         return '[^/]'
       }
-      return token.replace(/^\\/u, '').replaceAll(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`)
+      return token.startsWith('[') ? classExpression(token) : literal(token)
     })
     .join('')
 }
@@ -114,7 +146,10 @@ test('preserves matching semantics across wildcard overlaps and separators', () 
     ['*a*', '!*b*'],
     ['**', '!a/**'],
     ['?', '!a*', '!?b'],
-    ['!a', '!/']
+    ['!a', '!/'],
+    ['[ab]*', '*[^a]'],
+    ['[.-a]/**', '**/[!b]'],
+    ['[]a]', '?', '!a']
   ]
   for (const left of patterns) {
     for (const right of patterns) {
@@ -140,10 +175,21 @@ test('matches like fast-glob on every fixture pattern', () => {
 })
 
 test('rejects unsupported syntax and bounds expansion without returning partial results', () => {
-  for (const pattern of ['[a-z]', 'a!b', '*(a)', '{a,b', 'a}', 'a\\']) {
+  for (const pattern of [
+    '[a',
+    '[]',
+    '[!]',
+    String.raw`[\]`,
+    'a]',
+    'a!b',
+    '*(a)',
+    '{a,b',
+    'a}',
+    'a\\'
+  ]) {
     expect(() => distribute([pattern])).toThrow(SyntaxError)
   }
-  expect(() => distribute(['no', 'match', '[a]'])).toThrow(SyntaxError)
+  expect(() => distribute(['no', 'match', '[a'])).toThrow(SyntaxError)
   expect(() => distribute(['a'.repeat(513)])).toThrow(RangeError)
   expect(() => distribute(['!'.repeat(513)])).toThrow(RangeError)
   expect(() => distribute(['{a,b,c}'], { maxResults: 2 })).toThrow(RangeError)
