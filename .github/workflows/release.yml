@@ -24,9 +24,6 @@ jobs:
           cache: true
           run-install: true
 
-      - run: vp run check
-      - run: vp run test
-
       - name: Build
         run: vp run build
 

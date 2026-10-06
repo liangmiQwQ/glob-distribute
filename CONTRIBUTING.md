@@ -12,24 +12,21 @@ For new feature proposals, please open an Issue or start a Discussion first to g
 
 ## Setup Project
 
-Use the Node.js version in `.node-version` and the pnpm version in `package.json`.
+This project uses [Node.js](https://nodejs.org/) and [pnpm](https://pnpm.io/). Install the Node.js version in `.node-version`, enable pnpm with `corepack enable`, then install dependencies and Git hooks by running:
 
-```sh
+```bash
 pnpm install
-pnpm check
-pnpm build
-pnpm test
 ```
 
-Vite+ is installed locally; a global `vp` installation is optional.
-The test command currently permits an empty suite because conversion logic is not implemented.
+You can run formatting and linting checks, build the project and run tests with:
 
-### Releases
+```bash
+pnpm run check
+pnpm run build
+pnpm run test
+```
 
-Configure [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/) for `liangmiQwQ/glob-distribute`, workflow `release.yml`, before the first automated publish. The npm package must exist before its trusted publisher can be configured, so the initial publish requires an authenticated maintainer.
-
-Run `pnpm release` to bump the version, commit, and push a `v*` tag. The tag triggers the release workflow, which validates and builds the package, generates GitHub release notes, and publishes to npm.
-Do not release the scaffold; implement and test the conversion API first.
+If you have [Vite+](https://viteplus.dev/) installed globally, `vp install` and `vp run <script>` work as well.
 
 ## Creating Pull Request
 
