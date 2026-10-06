@@ -1,6 +1,6 @@
 {
   "name": "glob-distribute",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Convert glob AND expressions into include/exclude OR groups.",
   "homepage": "https://github.com/liangmiQwQ/glob-distribute#readme",
   "bugs": {
