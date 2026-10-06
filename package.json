@@ -1,0 +1,45 @@
+{
+  "name": "glob-distribute",
+  "version": "0.0.0",
+  "description": "Convert glob AND expressions into OR alternatives.",
+  "homepage": "https://github.com/liangmiQwQ/glob-distribute#readme",
+  "bugs": {
+    "url": "https://github.com/liangmiQwQ/glob-distribute/issues"
+  },
+  "license": "MIT",
+  "author": "Liang Mi <hi@liangmi.dev>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/liangmiQwQ/glob-distribute.git"
+  },
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.mjs",
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "vp run cpack",
+    "check": "vp run ccheck",
+    "dev": "vp pack --watch",
+    "prepare": "vp config",
+    "prepublishOnly": "vp run build",
+    "release": "bumpp",
+    "test": "vp run ctest"
+  },
+  "devDependencies": {
+    "@liangmi/vp-config": "catalog:",
+    "@types/node": "catalog:",
+    "@typescript/native-preview": "catalog:",
+    "bumpp": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vite-plus": "catalog:"
+  },
+  "packageManager": "pnpm@11.21.0"
+}
