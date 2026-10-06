@@ -69,4 +69,3 @@ Both limits must be positive safe integers. There is no fixed input length limit
 The implementation intersects path segments, and characters within each segment, with memoization. All transitions advance a position except simultaneous stars, whose shared loop can be emitted directly. Identical patterns and universal patterns have fast paths. Inputs and outputs are deduplicated, and empty intersections terminate early.
 
 The benchmark compares four workloads against `glob-intersection@0.1.3`, with 1,000 warmup calls and 10,000 measured calls per implementation. Timings depend on runtime, hardware, and input. The baseline is a performance reference only: it returns compressed brace expressions and gives `**` a different meaning, while this library materializes include/exclude arrays. It is a local comparison, not a guarantee for arbitrary globs.
-
