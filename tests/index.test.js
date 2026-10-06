@@ -1,6 +1,7 @@
 import { expect, expectTypeOf, test } from 'vite-plus/test'
 
 import { distribute } from '../src/index.ts'
+import compatibility from './fixtures/compatibility.json' with { type: 'json' }
 import fixture from './fixtures/fast-glob.json' with { type: 'json' }
 
 // Public examples cover AND inputs and OR outputs, including nested and empty alternatives.
@@ -38,7 +39,7 @@ test('keeps negated terms and drops alternatives they fully exclude', () => {
   expect(distribute([String.raw`\!a`])).toEqual([String.raw`\!a`])
 })
 
-// Classes intersect as code point sets, so the output is a canonical literal, `?`, or class, as fast-glob reads them.
+// Classes intersect as byte sets, so the output is a canonical literal, `?`, or class, as fast-glob reads them.
 test('intersects character classes', () => {
   expect(distribute(['[a-z]', '[^m]'])).toEqual(['[a-ln-z]'])
   expect(distribute(['[^a]', '[!b]'])).toEqual(['[^ab]'])
@@ -56,7 +57,10 @@ const matchers = new Map()
 
 /** @param {string} token */
 function literal(token) {
-  return token.replace(/^\\/u, '').replaceAll(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`)
+  const value = token.startsWith('\\')
+    ? ({ b: '\b', n: '\n', r: '\r', t: '\t' }[token[1]] ?? token.slice(1))
+    : token
+  return value.replaceAll(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`)
 }
 
 /** A class follows fast-glob: `^`/`!` negates, the first member is literal, `-` ranges, and `/` never matches. @param {string} token */
@@ -94,7 +98,8 @@ function matcher(pattern) {
   if (matchers.has(pattern)) {
     return matchers.get(pattern)
   }
-  const segments = pattern.replace(/(^|\/)\*\*$/u, '$1**/*').split('/')
+  const bytes = Buffer.from(pattern).toString('latin1')
+  const segments = bytes.replace(/(^|\/)\*\*$/u, '$1**/*').split('/')
   const expression = segments
     .map(segment => (segment === '**' ? '(?:[^/]*/)*' : `${segmentExpression(segment)}/`))
     .join('')
@@ -108,7 +113,7 @@ function matcher(pattern) {
 function satisfies(pattern, value) {
   return pattern.startsWith('!')
     ? !satisfies(pattern.slice(1), value)
-    : matcher(pattern).test(value)
+    : matcher(pattern).test(Buffer.from(value).toString('latin1'))
 }
 
 /** An output list matches when some alternative matches and every `!` term is satisfied. @param {string[]} output @param {string} value */
@@ -174,24 +179,16 @@ test('matches like fast-glob on every fixture pattern', () => {
   }
 })
 
-test('rejects unsupported syntax and bounds expansion without returning partial results', () => {
-  for (const pattern of [
-    '[a',
-    '[]',
-    '[!]',
-    String.raw`[\]`,
-    'a]',
-    'a!b',
-    '*(a)',
-    '{a,b',
-    'a}',
-    'a\\'
-  ]) {
+test('validates upstream syntax and bounds expansion without returning partial results', () => {
+  for (const pattern of ['[a', '[]', '[!]', String.raw`[\]`, '{a,b', 'a\\']) {
     expect(() => distribute([pattern])).toThrow(SyntaxError)
   }
   expect(() => distribute(['no', 'match', '[a'])).toThrow(SyntaxError)
-  expect(() => distribute(['a'.repeat(513)])).toThrow(RangeError)
-  expect(() => distribute(['!'.repeat(513)])).toThrow(RangeError)
+  expect(distribute(['a'.repeat(513)])).toEqual(['a'.repeat(513)])
+  expect(distribute([`${'!'.repeat(514)}a`])).toEqual(['a'])
+  expect(() => distribute(['{a}'.repeat(11)])).toThrow(/10 brace groups/u)
+  expect(() => distribute([`${'{'.repeat(11)}a${'}'.repeat(11)}`])).toThrow(/10 nesting levels/u)
+  expect(distribute(['{a,a}'], { maxResults: 1 })).toEqual(['a'])
   expect(() => distribute(['{a,b,c}'], { maxResults: 2 })).toThrow(RangeError)
   expect(() => distribute(['?', '!a', '!b'], { maxResults: 2 })).toThrow(RangeError)
   expect(() => distribute(['*a*b*', '*c*d*'], { maxOperations: 20 })).toThrow(RangeError)
@@ -199,4 +196,28 @@ test('rejects unsupported syntax and bounds expansion without returning partial 
   expect(() => distribute(['*'], { maxOperations: Infinity })).toThrow(RangeError)
   // @ts-expect-error JavaScript callers also get a clear input error.
   expect(() => distribute([42])).toThrow(TypeError)
+})
+
+// Recorded by the real Rust matcher; expected input semantics do not come from the JavaScript oracle.
+test('preserves fast-glob syntax through expansion and intersection', () => {
+  for (const { inputs, matches } of compatibility.cases) {
+    const output = distribute(inputs)
+    const expected = compatibility.paths.filter((_, i) => matches[i] === '1')
+    const actual = compatibility.paths.filter(value => matchesList(output, value))
+    expect(actual, JSON.stringify({ inputs, output })).toEqual(expected)
+  }
+})
+
+// Unlike the upstream matcher, reaching a brace globstar does not commit an earlier wildcard's first match.
+test('keeps wildcard language semantics across brace globstars', () => {
+  const output = distribute(['*a{**}/'])
+  for (const value of ['a', 'aa', 'ba', 'baa', 'a/', 'a/x/']) {
+    expect(matchesList(output, value), value).toBe(true)
+  }
+  for (const value of ['', 'b', 'ab', 'a/x']) {
+    expect(matchesList(output, value), value).toBe(false)
+  }
+  expect(matchesList(distribute(['*{**}/']), 'a')).toBe(true)
+  expect(matchesList(distribute(['*a{**}/', 'aa']), 'aa')).toBe(true)
+  expect(matchesList(distribute(['*', '!*a{**}/']), 'aa')).toBe(false)
 })
