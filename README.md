@@ -44,22 +44,22 @@ Negated terms are kept verbatim after brace expansion rather than distributed, b
 
 ## Glob dialect
 
-This uses the small, permissive dialect of [glob-intersection](https://github.com/Pathgather/glob-intersection), with backslash escaping added:
+Patterns follow the common globstar dialect shared by Bash's `globstar`, [picomatch](https://github.com/micromatch/picomatch), and [minimatch](https://github.com/isaacs/minimatch), with dotfiles included:
 
-| Syntax                 | Meaning                                                       |
-| ---------------------- | ------------------------------------------------------------- |
-| `*`                    | Zero or more characters except `/`                            |
-| `**`                   | Zero or more characters, including `/`, anywhere in a pattern |
-| `?`                    | Exactly one Unicode code point except `/`                     |
-| `{a,b}`                | Alternatives; nesting and empty branches are supported        |
-| `\*`, `\?`, `\{`, etc. | A literal escaped character                                   |
-| `!pattern`             | Negation; only valid at the start of a pattern                |
+| Syntax                 | Meaning                                                          |
+| ---------------------- | ---------------------------------------------------------------- |
+| `*`                    | Zero or more characters within a path segment                    |
+| `**`                   | As a whole segment, zero or more segments; otherwise same as `*` |
+| `?`                    | Exactly one Unicode code point except `/`                        |
+| `{a,b}`                | Alternatives; nesting and empty branches are supported           |
+| `\*`, `\?`, `\{`, etc. | A literal escaped character                                      |
+| `!pattern`             | Negation; only valid at the start of a pattern                   |
 
-Matching is case-sensitive. Wildcards include dotfiles and newlines. Paths use `/`; backslashes escape characters and are not Windows separators. Slashes are literal: `**/file` requires a slash and does not match `file`. For optional directories, use `{,**/}file`.
+A path is a sequence of `/`-separated segments. `**/file` matches `file`, `a/file`, and `a/b/file`; `a/**/b` matches `a/b`; `a/**` matches `a` and everything below it, as picomatch does. Elsewhere `**` is a single-segment wildcard, so `a**b` is normalized to `a*b`. Matching is case-sensitive and wildcards include dotfiles and newlines, like `{ dot: true }` in picomatch. Backslashes escape characters and are not Windows separators. A trailing slash is significant: `a/` matches only `a/`.
 
-Character classes and extglobs are unsupported: unescaped `[`, `]`, `(`, `)`, and `!` after the first character throw `SyntaxError`, as do malformed braces and dangling escapes. Braces group alternatives only; range notation is not expanded (`{1..3}` matches the literal text `1..3`). Escape braces to match them literally.
+Character classes and extglobs are unsupported: unescaped `[`, `]`, `(`, `)`, and `!` after the first character throw `SyntaxError`, as do malformed braces and dangling escapes. Braces group alternatives only: `{a}` and `{1..3}` match their literal text. Escape braces to match them literally.
 
-These semantics are deliberately explicit: outputs must be consumed by a matcher using the same dialect. Standard filesystem globbers often assign different meanings to dotfiles and `**`.
+Outputs are globs in the same dialect, so any matcher with these semantics consumes them directly.
 
 ## Limits
 
@@ -76,7 +76,7 @@ Both limits must be positive safe integers. Each input is limited to 512 UTF-16 
 
 ## Performance and development
 
-The implementation intersects token positions with memoization. All transitions advance a position except simultaneous stars, whose shared loop can be emitted directly. Identical patterns and universal patterns have fast paths. Inputs and outputs are deduplicated, and empty intersections terminate early.
+The implementation intersects path segments, and characters within each segment, with memoization. All transitions advance a position except simultaneous stars, whose shared loop can be emitted directly. Identical patterns and universal patterns have fast paths. Inputs and outputs are deduplicated, and empty intersections terminate early.
 
 ```sh
 pnpm install
@@ -86,7 +86,7 @@ pnpm run build
 pnpm run bench
 ```
 
-The benchmark compares four workloads against `glob-intersection@0.1.3`, with 1,000 warmup calls and 10,000 measured calls per implementation. Timings depend on runtime, hardware, and input. The baseline returns compressed brace expressions, while this library materializes an array; the benchmark includes this API difference. It is a local comparison, not a guarantee for arbitrary globs.
+The benchmark compares four workloads against `glob-intersection@0.1.3`, with 1,000 warmup calls and 10,000 measured calls per implementation. Timings depend on runtime, hardware, and input. The baseline is a performance reference only: it returns compressed brace expressions and gives `**` a different meaning, while this library materializes an array. It is a local comparison, not a guarantee for arbitrary globs.
 
 ## License
 

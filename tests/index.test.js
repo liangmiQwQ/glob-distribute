@@ -1,3 +1,4 @@
+import picomatch from 'picomatch'
 import { expect, expectTypeOf, test } from 'vite-plus/test'
 
 import { distribute } from '../src/index.ts'
@@ -15,6 +16,17 @@ test('distributes conjunctions into equivalent alternatives', () => {
   expectTypeOf(distribute(['*'])).toEqualTypeOf(/** @type {string[]} */ ([]))
 })
 
+// `**` spans directories only as a whole segment, matching zero or more of them, as standard globbers do.
+test('treats `**` as a segment wildcard and single-element braces as literal text', () => {
+  expect(distribute(['**/file', 'file'])).toEqual(['file'])
+  expect(distribute(['src/**/*.ts', 'src/*.ts'])).toEqual(['src/*.ts'])
+  expect(distribute(['a/**', 'a'])).toEqual(['a'])
+  expect(distribute(['a**b', '**'])).toEqual(['a*b'])
+  expect(distribute(['**/**/x', String.raw`a\/**`])).toEqual(['a/**/x'])
+  expect(distribute(['{a}', '{a,b}'])).toEqual([])
+  expect(distribute(['{a}', String.raw`\{a\}`])).toEqual(['{a}'])
+})
+
 // A leading `!` negates a term; complements are not globs, so they stay as `!` entries after the alternatives.
 test('keeps negated terms and drops alternatives they fully exclude', () => {
   expect(distribute(['**/*.js', '!**/*.test.js'])).toEqual(['**/*.js', '!**/*.test.js'])
@@ -27,20 +39,17 @@ test('keeps negated terms and drops alternatives they fully exclude', () => {
   expect(distribute([String.raw`\!a`])).toEqual([String.raw`\!a`])
 })
 
-// This oracle translates the documented syntax to regex, independently of the intersection algorithm.
+// This oracle encodes the documented segment semantics independently of the intersection algorithm.
 const matchers = new Map()
 
-/** @param {string} pattern */
-function matcher(pattern) {
-  if (matchers.has(pattern)) {
-    return matchers.get(pattern)
+/** @param {string} segment */
+function segmentMatcher(segment) {
+  if (matchers.has(segment)) {
+    return matchers.get(segment)
   }
-  const tokens = pattern.match(/\\[\s\S]|\*\*|[^]/gu) ?? []
+  const tokens = segment.match(/\\[\s\S]|[^]/gu) ?? []
   const expression = tokens
     .map(token => {
-      if (token === '**') {
-        return String.raw`[\s\S]*`
-      }
       if (token === '*') {
         return '[^/]*'
       }
@@ -51,15 +60,30 @@ function matcher(pattern) {
     })
     .join('')
   const regex = new RegExp(`^(?:${expression})$(?!.)`, 'su')
-  matchers.set(pattern, regex)
+  matchers.set(segment, regex)
   return regex
 }
 
-/** A `!` pattern is satisfied when its body does not match. @param {string} pattern @param {string} value */
+/** `**` matches zero or more whole segments; any other segment matches exactly one. @param {string[]} pattern @param {string[]} path @returns {boolean} */
+function matchesSegments(pattern, path) {
+  const head = pattern.at(0)
+  const rest = pattern.slice(1)
+  if (head === undefined) {
+    return path.length === 0
+  }
+  if (head === '**') {
+    return path.some((_, i) => matchesSegments(rest, path.slice(i))) || matchesSegments(rest, [])
+  }
+  return (
+    path.length > 0 && segmentMatcher(head).test(path[0]) && matchesSegments(rest, path.slice(1))
+  )
+}
+
+/** A `!` pattern is satisfied when its body does not match. @param {string} pattern @param {string} value @returns {boolean} */
 function satisfies(pattern, value) {
   return pattern.startsWith('!')
-    ? !matcher(pattern.slice(1)).test(value)
-    : matcher(pattern).test(value)
+    ? !satisfies(pattern.slice(1), value)
+    : matchesSegments(pattern.split('/'), value.split('/'))
 }
 
 /** An output list matches when some alternative matches and every `!` term is satisfied. @param {string[]} output @param {string} value */
@@ -109,6 +133,30 @@ test('preserves matching semantics across wildcard overlaps and separators', () 
     const expected = candidates.filter(value => inputs.every(pattern => satisfies(pattern, value)))
     const actual = candidates.filter(value => matchesList(output, value))
     expect(actual, JSON.stringify({ inputs, output })).toEqual(expected)
+  }
+})
+
+// Spot-check the documented semantics against picomatch, the matcher behind fast-glob, globby, and tinyglobby.
+test('agrees with picomatch on ordinary relative paths', () => {
+  const fixtures = [
+    ['**/*.ts', '!**/*.test.ts'],
+    ['src/**', '**/*.{js,ts}'],
+    ['a/**/b', '**/b/**'],
+    ['**/x', 'a/*/x'],
+    ['a**b', '**'],
+    ['*.?s', '!*.{j,t}s']
+  ]
+  // Picomatch ignores slashes at the path edges and never lets wildcards match a bare `.` segment.
+  const candidates = words(['a', 'b', '.', 'x', 'ts', 'js', '/'], 4).filter(
+    value => value !== '' && !/^\/|\/$|\/\/|(?:^|\/)\.(?:\/|$)/u.test(value)
+  )
+  for (const inputs of fixtures) {
+    const output = distribute(inputs)
+    for (const value of candidates) {
+      const expected = inputs.every(pattern => picomatch(pattern, { dot: true })(value))
+      const actual = matchesList(output, value)
+      expect(actual, JSON.stringify({ inputs, output, value })).toBe(expected)
+    }
   }
 })
 
