@@ -17,11 +17,26 @@ export function distribute(patterns: readonly string[], options: DistributeOptio
     throw new TypeError('Expected an array of glob strings')
   }
 
-  // Parse every input before intersecting so invalid syntax never depends on input order.
-  const groups = [...new Set(patterns)].map(pattern => parse(pattern, budget))
-  groups.sort((left, right) => left.length - right.length)
+  // 1. Parse every input before intersecting so invalid syntax never depends on input order.
+  // Bound recursion depth independently of the configurable expansion budget, before `!` is collapsed.
+  if (patterns.some(pattern => pattern.length > 512)) {
+    throw new RangeError('Glob patterns must not exceed 512 UTF-16 code units')
+  }
+  const included: string[][][] = []
+  const excluded: string[][] = []
+  for (const pattern of new Set(patterns.map(stripNegation))) {
+    const group = parse(pattern.replace(/^!/u, ''), budget)
+    if (pattern.startsWith('!')) {
+      excluded.push(...group)
+    } else {
+      included.push(group)
+    }
+  }
+
+  // 2. Intersect the positive terms, smallest groups first to keep intermediate unions small.
+  included.sort((left, right) => left.length - right.length)
   let result = ['**']
-  for (const group of groups) {
+  for (const group of included) {
     const next = new Set<string>()
     for (const left of result) {
       const leftTokens = tokenize(left)
@@ -37,7 +52,30 @@ export function distribute(patterns: readonly string[], options: DistributeOptio
       break
     }
   }
-  return result
+
+  // 3. A complement is not a glob, so negations stay as `!` terms; only redundant ones are removed.
+  const kept = result.filter(
+    pattern => !excluded.some(negated => covers(negated, tokenize(pattern), budget))
+  )
+  const negations = [...new Set(excluded.map(negated => negated.join('')))].filter(negated =>
+    kept.some(pattern => intersect(tokenize(pattern), tokenize(negated), budget).length > 0)
+  )
+  const output = new Set(kept)
+  for (const negated of negations) {
+    add(output, `!${negated}`, budget)
+  }
+  return [...output]
+}
+
+/** Collapse leading `!` so `!!a` is `a`, and `!!!a` is `!a`. */
+function stripNegation(pattern: string): string {
+  const body = pattern.replace(/^!+/u, '')
+  return (pattern.length - body.length) % 2 === 0 ? body : `!${body}`
+}
+
+/** Whether `pattern` is contained in `negated`, so every string it matches is excluded. */
+function covers(negated: string[], pattern: string[], budget: Budget): boolean {
+  return intersect(pattern, negated, budget).includes(pattern.join(''))
 }
 
 function createBudget(options: DistributeOptions): Budget {
@@ -72,10 +110,6 @@ function tokenize(pattern: string): string[] {
 }
 
 function parse(pattern: string, budget: Budget): string[][] {
-  // Bound recursion depth independently of the configurable expansion budget.
-  if (pattern.length > 512) {
-    throw new RangeError('Glob patterns must not exceed 512 UTF-16 code units')
-  }
   const tokens = tokenize(pattern)
   let position = 0
 
